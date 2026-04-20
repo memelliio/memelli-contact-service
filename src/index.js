@@ -1,10 +1,13 @@
 import Fastify from 'fastify';
 import pg from 'pg';
+import jwt from 'jsonwebtoken';
 
 const { Pool } = pg;
 const app = Fastify({ logger: true });
 const PORT = Number(process.env.PORT) || 8080;
 const DATABASE_URL = process.env.MEMELLI_CORE_DATABASE_URL || process.env.DATABASE_URL;
+const JWT_SECRET = process.env.JWT_SECRET || process.env.APP_SECRET || 'memelli-secret';
+const INTERNAL_TOKEN = process.env.INTERNAL_SERVICE_TOKEN || '';
 
 if (!DATABASE_URL) {
   console.error('Missing DATABASE_URL / MEMELLI_CORE_DATABASE_URL');
@@ -13,17 +16,39 @@ if (!DATABASE_URL) {
 
 const pool = new Pool({ connectionString: DATABASE_URL, ssl: { rejectUnauthorized: false }, max: 10 });
 
-// ── Auth — trusts X-Tenant-Id + Bearer from gateway. Production upgrade: verify JWT. ─
+// ── Auth — Bearer JWT OR internal-token shared secret. No more "trust X-Tenant-Id" hole. ─
 app.addHook('onRequest', async (req, reply) => {
   if (req.url === '/health') return;
-  const tenantId = req.headers['x-tenant-id'];
-  if (!tenantId) return reply.code(401).send({ success: false, error: 'missing tenant' });
-  req.tenantId = tenantId;
+
+  // 1. Service-to-service shared secret (gateway / self-heal / admin tooling).
+  //    The caller supplies X-Tenant-Id explicitly — trusted because the token is.
+  if (INTERNAL_TOKEN) {
+    const internal = req.headers['x-internal-token'];
+    if (internal && internal === INTERNAL_TOKEN) {
+      const tenantId = req.headers['x-tenant-id'];
+      if (!tenantId) return reply.code(400).send({ success: false, error: 'x-tenant-id required with internal token' });
+      req.tenantId = tenantId;
+      req.user = { role: 'SUPER_ADMIN', id: 'internal-service', tenantId };
+      return;
+    }
+  }
+
+  // 2. Bearer JWT — user calls must present a signed token with tenantId claim.
+  const auth = req.headers.authorization || '';
+  const token = auth.startsWith('Bearer ') ? auth.slice(7) : '';
+  if (!token) return reply.code(401).send({ success: false, error: 'missing bearer token' });
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+    if (!decoded?.tenantId) return reply.code(401).send({ success: false, error: 'token missing tenantId claim' });
+    req.tenantId = decoded.tenantId;
+    req.user = decoded;
+  } catch {
+    return reply.code(401).send({ success: false, error: 'invalid token' });
+  }
 });
 
 app.get('/health', async () => ({ ok: true, service: 'contact-service' }));
 
-// ── List / search ───────────────────────────────────────────────────
 app.get('/contacts', async (req, reply) => {
   const { q = '', tag, lifecycle, limit = 50, offset = 0 } = req.query || {};
   const params = [req.tenantId];
@@ -51,7 +76,6 @@ app.get('/contacts', async (req, reply) => {
   }
 });
 
-// ── Get by id ───────────────────────────────────────────────────────
 app.get('/contacts/:id', async (req, reply) => {
   try {
     const r = await pool.query(`SELECT * FROM "Contact" WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL`, [req.params.id, req.tenantId]);
@@ -62,7 +86,6 @@ app.get('/contacts/:id', async (req, reply) => {
   }
 });
 
-// ── Create ──────────────────────────────────────────────────────────
 app.post('/contacts', async (req, reply) => {
   const b = req.body || {};
   const fields = ['tenant_id', 'first_name', 'last_name', 'email', 'phone', 'tags', 'source', 'lifecycle_stage', 'assigned_to_id'];
@@ -77,7 +100,6 @@ app.post('/contacts', async (req, reply) => {
   }
 });
 
-// ── Update ──────────────────────────────────────────────────────────
 app.patch('/contacts/:id', async (req, reply) => {
   const b = req.body || {};
   const map = {
@@ -101,7 +123,6 @@ app.patch('/contacts/:id', async (req, reply) => {
   }
 });
 
-// ── Soft delete ─────────────────────────────────────────────────────
 app.delete('/contacts/:id', async (req, reply) => {
   try {
     const r = await pool.query(
@@ -115,7 +136,6 @@ app.delete('/contacts/:id', async (req, reply) => {
   }
 });
 
-// ── Tag add / remove ────────────────────────────────────────────────
 app.post('/contacts/:id/tags', async (req, reply) => {
   const { tag, op = 'add' } = req.body || {};
   if (!tag) return reply.code(400).send({ success: false, error: 'tag required' });
@@ -130,7 +150,6 @@ app.post('/contacts/:id/tags', async (req, reply) => {
   }
 });
 
-// ── Bulk CSV import ─────────────────────────────────────────────────
 app.post('/contacts/import', async (req, reply) => {
   const rows = Array.isArray(req.body?.rows) ? req.body.rows : [];
   if (!rows.length) return reply.code(400).send({ success: false, error: 'rows required' });
