@@ -178,3 +178,12 @@ export function startGroqPoolSupervisor(): void {
   claimIdleAgents().catch(() => {});
   sendHeartbeat().catch(() => {});
 }
+
+// ── Auto-start when STANDALONE_REPO env is set (Track D 2026-05-02) ──
+if (typeof process !== "undefined" && process.env && process.env.STANDALONE_REPO) {
+  try {
+    startGroqPoolSupervisor();
+  } catch (err) {
+    console.warn("[groq-pool-supervisor] auto-start failed:", (err as any)?.message);
+  }
+}
