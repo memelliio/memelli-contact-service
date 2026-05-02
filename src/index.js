@@ -6,8 +6,16 @@ const { Pool } = pg;
 const app = Fastify({ logger: true });
 const PORT = Number(process.env.PORT) || 8080;
 const DATABASE_URL = process.env.MEMELLI_CORE_DATABASE_URL || process.env.DATABASE_URL;
-const JWT_SECRET = process.env.JWT_SECRET || process.env.APP_SECRET || 'memelli-secret';
-const INTERNAL_TOKEN = process.env.INTERNAL_SERVICE_TOKEN || '';
+
+const JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET) {
+  throw new Error('JWT_SECRET required');
+}
+
+const INTERNAL_TOKEN = process.env.INTERNAL_SERVICE_TOKEN;
+if (!INTERNAL_TOKEN) {
+  throw new Error('INTERNAL_SERVICE_TOKEN required');
+}
 
 if (!DATABASE_URL) {
   console.error('Missing DATABASE_URL / MEMELLI_CORE_DATABASE_URL');
@@ -91,7 +99,7 @@ app.post('/contacts', async (req, reply) => {
   const fields = ['tenant_id', 'first_name', 'last_name', 'email', 'phone', 'tags', 'source', 'lifecycle_stage', 'assigned_to_id'];
   const values = [req.tenantId, b.firstName || null, b.lastName || null, b.email || null, b.phone || null, b.tags || [], b.source || null, b.lifecycleStage || null, b.assignedToId || null];
   const placeholders = values.map((_, i) => `$${i + 1}`).join(', ');
-  const sql = `INSERT INTO "Contact" (${fields.map((f) => `"${f}"`).join(', ')}, created_at, updated_at) VALUES (${placeholders}, NOW(), NOW()) RETURNING *`;
+  const sql = `INSERT INTO "Contact" (${fields.map((f) => \`"\${f}"\`).join(', ')}, created_at, updated_at) VALUES (${placeholders}, NOW(), NOW()) RETURNING *`;
   try {
     const r = await pool.query(sql, values);
     reply.code(201).send({ success: true, data: r.rows[0] });
@@ -108,12 +116,12 @@ app.patch('/contacts/:id', async (req, reply) => {
   };
   const sets = []; const params = [];
   for (const [k, col] of Object.entries(map)) {
-    if (k in b) { params.push(b[k]); sets.push(`"${col}" = $${params.length}`); }
+    if (k in b) { params.push(b[k]); sets.push(\`"\${col}" = $\${params.length}\`); }
   }
   if (!sets.length) return reply.code(400).send({ success: false, error: 'no fields to update' });
   sets.push('updated_at = NOW()');
   params.push(req.params.id, req.tenantId);
-  const sql = `UPDATE "Contact" SET ${sets.join(', ')} WHERE id = $${params.length - 1} AND tenant_id = $${params.length} AND deleted_at IS NULL RETURNING *`;
+  const sql = \`UPDATE "Contact" SET \${sets.join(', ')} WHERE id = $\${params.length - 1} AND tenant_id = $\${params.length} AND deleted_at IS NULL RETURNING *\`;
   try {
     const r = await pool.query(sql, params);
     if (!r.rows[0]) return reply.code(404).send({ success: false, error: 'not found' });
@@ -126,7 +134,7 @@ app.patch('/contacts/:id', async (req, reply) => {
 app.delete('/contacts/:id', async (req, reply) => {
   try {
     const r = await pool.query(
-      `UPDATE "Contact" SET deleted_at = NOW() WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL RETURNING id`,
+      \`UPDATE "Contact" SET deleted_at = NOW() WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL RETURNING id\`,
       [req.params.id, req.tenantId],
     );
     if (!r.rows[0]) return reply.code(404).send({ success: false, error: 'not found' });
@@ -140,8 +148,8 @@ app.post('/contacts/:id/tags', async (req, reply) => {
   const { tag, op = 'add' } = req.body || {};
   if (!tag) return reply.code(400).send({ success: false, error: 'tag required' });
   const sql = op === 'remove'
-    ? `UPDATE "Contact" SET tags = array_remove(tags, $1), updated_at = NOW() WHERE id = $2 AND tenant_id = $3 AND deleted_at IS NULL RETURNING tags`
-    : `UPDATE "Contact" SET tags = array_append(tags, $1), updated_at = NOW() WHERE id = $2 AND tenant_id = $3 AND deleted_at IS NULL AND NOT ($1 = ANY(tags)) RETURNING tags`;
+    ? \`UPDATE "Contact" SET tags = array_remove(tags, $1), updated_at = NOW() WHERE id = $2 AND tenant_id = $3 AND deleted_at IS NULL RETURNING tags\`
+    : \`UPDATE "Contact" SET tags = array_append(tags, $1), updated_at = NOW() WHERE id = $2 AND tenant_id = $3 AND deleted_at IS NULL AND NOT ($1 = ANY(tags)) RETURNING tags\`;
   try {
     const r = await pool.query(sql, [tag, req.params.id, req.tenantId]);
     reply.send({ success: true, data: { tags: r.rows[0]?.tags || [] } });
@@ -157,8 +165,8 @@ app.post('/contacts/import', async (req, reply) => {
   for (const r of rows) {
     try {
       await pool.query(
-        `INSERT INTO "Contact" ("tenant_id","first_name","last_name","email","phone","tags","source","created_at","updated_at")
-         VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW())`,
+        \`INSERT INTO "Contact" ("tenant_id","first_name","last_name","email","phone","tags","source","created_at","updated_at")
+         VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW())\`,
         [req.tenantId, r.firstName || null, r.lastName || null, r.email || null, r.phone || null, r.tags || [], r.source || 'import'],
       );
       inserted += 1;
